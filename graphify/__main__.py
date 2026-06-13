@@ -2271,6 +2271,13 @@ def main() -> None:
         print("  devin install           write skill to ~/.config/devin/skills/graphify/ (Devin CLI)")
         print("  devin uninstall         remove skill from ~/.config/devin/skills/graphify/")
         print()
+        print("Plugins:")
+        print("  arch                    architecture enforcement (requires graphify-arch plugin)")
+        print("    arch audit            check files for architectural violations")
+        print("    arch set-status       override compliance status for a file")
+        print("    arch analyze          validate ontology config syntax")
+        print("    arch setup-embeddings download ONNX embedding model")
+        print()
         return
 
     cmd = sys.argv[1]
