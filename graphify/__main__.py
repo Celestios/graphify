@@ -282,7 +282,7 @@ def _copy_skill_file(platform_name: str, *, project: bool = False, project_dir: 
     
     # Call graphify-arch plugin hook if installed
     try:
-        from graphify_arch.plugin_helpers import PluginReportGenerator
+        from plugin_helpers import PluginReportGenerator
         PluginReportGenerator.on_graphify_install(skill_dst.parent)
     except ImportError:
         pass  # graphify-arch not installed, skip
@@ -882,7 +882,7 @@ def vscode_install(project_dir: Path | None = None) -> None:
     
     # Call graphify-arch plugin hook if installed
     try:
-        from graphify_arch.plugin_helpers import PluginReportGenerator
+        from plugin_helpers import PluginReportGenerator
         PluginReportGenerator.on_graphify_install(skill_dst.parent)
     except ImportError:
         pass  # graphify-arch not installed, skip
