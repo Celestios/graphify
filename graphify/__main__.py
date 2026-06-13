@@ -279,6 +279,16 @@ def _copy_skill_file(platform_name: str, *, project: bool = False, project_dir: 
 
     (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
     print(f"  skill installed  ->  {skill_dst}")
+    
+    # Call graphify-arch plugin hook if installed
+    try:
+        from graphify_arch.plugin_helpers import PluginReportGenerator
+        PluginReportGenerator.on_graphify_install(skill_dst.parent)
+    except ImportError:
+        pass  # graphify-arch not installed, skip
+    except Exception as e:
+        print(f"  warning: graphify-arch post-install hook failed: {e}", file=sys.stderr)
+    
     return skill_dst
 
 
@@ -869,6 +879,15 @@ def vscode_install(project_dir: Path | None = None) -> None:
             shutil.rmtree(orphan_refs)
     (skill_dst.parent / ".graphify_version").write_text(__version__, encoding="utf-8")
     print(f"  skill installed  ->  {skill_dst}")
+    
+    # Call graphify-arch plugin hook if installed
+    try:
+        from graphify_arch.plugin_helpers import PluginReportGenerator
+        PluginReportGenerator.on_graphify_install(skill_dst.parent)
+    except ImportError:
+        pass  # graphify-arch not installed, skip
+    except Exception as e:
+        print(f"  warning: graphify-arch post-install hook failed: {e}", file=sys.stderr)
 
     instructions = (project_dir or Path(".")) / ".github" / "copilot-instructions.md"
     instructions.parent.mkdir(parents=True, exist_ok=True)
