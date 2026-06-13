@@ -54,6 +54,8 @@ def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
             kwargs["trials"] = 1
         if "resolution" in lsig:
             kwargs["resolution"] = resolution
+        if "weight" in lsig:
+            kwargs["weight"] = "weight"
         # Suppress graspologic output to prevent ANSI escape codes from
         # corrupting PowerShell 5.1 scroll buffer (issue #19)
         old_stderr = sys.stderr
@@ -70,9 +72,12 @@ def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
     # Fallback: networkx louvain (available since networkx 2.7).
     # Inspect kwargs to stay compatible across NetworkX versions — max_level
     # was added in a later release and prevents hangs on large sparse graphs.
+    louvain_params = inspect.signature(nx.community.louvain_communities).parameters
     kwargs: dict = {"seed": 42, "threshold": 1e-4, "resolution": resolution}
-    if "max_level" in inspect.signature(nx.community.louvain_communities).parameters:
+    if "max_level" in louvain_params:
         kwargs["max_level"] = 10
+    if "weight" in louvain_params:
+        kwargs["weight"] = "weight"
     communities = nx.community.louvain_communities(stable, **kwargs)
     return {node: cid for cid, nodes in enumerate(communities) for node in nodes}
 

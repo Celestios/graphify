@@ -215,4 +215,13 @@ def generate(
                     lines.append(f"- **{q['question']}**")
                     lines.append(f"  _{q['why']}_")
 
-    return "\n".join(lines)
+    report_text = "\n".join(lines)
+    try:
+        from graphify.plugins import discover_plugins, run_hook
+        from pathlib import Path
+        plugins = discover_plugins(Path(root))
+        report_text = run_hook(plugins, "on_report", report_text, G, communities, root)
+    except Exception as e:
+        print(f"warning: error running on_report plugin: {e}")
+    return report_text
+

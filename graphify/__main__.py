@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from graphify.plugins import discover_plugins, run_hook
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -2096,6 +2097,17 @@ def main() -> None:
         for skill_dst in {_platform_skill_destination(name) for name in _PLATFORM_CONFIG}:
             _check_skill_version(skill_dst)
 
+    if len(sys.argv) >= 2:
+        try:
+            from graphify.plugins import discover_plugins
+            plugins = discover_plugins(Path.cwd())
+            for plugin in plugins:
+                if hasattr(plugin, "handle_cli"):
+                    if plugin.handle_cli(sys.argv[1:]):
+                        return
+        except Exception as e:
+            print(f"warning: error in plugin CLI handler: {e}", file=sys.stderr)
+
     if len(sys.argv) >= 2 and sys.argv[1] in ("-v", "--version", "version"):
         print(f"graphify {__version__}")
         return
@@ -2262,6 +2274,13 @@ def main() -> None:
         return
 
     cmd = sys.argv[1]
+
+    root = Path(".").resolve()
+    if len(sys.argv) >= 3 and cmd in ("extract", "update", "query", "affected", "cluster-only", "label") and not sys.argv[2].startswith("-"):
+        p = Path(sys.argv[2]).resolve()
+        if p.exists():
+            root = p if p.is_dir() else p.parent
+    plugins = discover_plugins(root)
 
     # Universal help guard: -h/--help/-? anywhere after the command shows help
     # and stops — prevents flags from silently triggering destructive subcommands
@@ -4334,6 +4353,8 @@ def main() -> None:
             "output_tokens": ast_result.get("output_tokens", 0) + sem_result.get("output_tokens", 0),
         }
 
+        merged = run_hook(plugins, "on_post_extract", merged, target)
+
         graph_json_path = graphify_out / "graph.json"
         analysis_path = graphify_out / ".graphify_analysis.json"
 
@@ -4415,6 +4436,9 @@ def main() -> None:
             )
         else:
             G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend, root=target)
+
+        G = run_hook(plugins, "on_post_build", G, merged, target)
+
         if G.number_of_nodes() == 0:
             print(
                 "[graphify extract] graph is empty — extraction produced no nodes. "
@@ -4464,6 +4488,9 @@ def main() -> None:
                 "output": merged["output_tokens"],
             },
         }
+
+        analysis = run_hook(plugins, "on_post_analyze", G, communities, analysis, target)
+
         analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
         try:
             _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target)
@@ -4501,6 +4528,8 @@ def main() -> None:
             f"`graphify cluster-only {graphify_out.parent}` "
             "to generate GRAPH_REPORT.md and name communities"
         )
+
+        run_hook(plugins, "on_export", G, communities, analysis, graphify_out)
 
     elif cmd == "cache-check":
         # graphify cache-check <files_from> [--root <dir>]

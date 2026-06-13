@@ -957,7 +957,8 @@ def _build_server(graph_path: str):
 
     @server.list_resources()
     async def list_resources() -> list[types.Resource]:
-        return [
+        disable_arch = os.environ.get("GRAPHIFY_DISABLE_ARCH") == "1"
+        res_list = [
             types.Resource(uri=AnyUrl("graphify://report"), name="Graph Report", description="Full GRAPH_REPORT.md", mimeType="text/markdown"),
             types.Resource(uri=AnyUrl("graphify://stats"), name="Graph Stats", description="Node/edge/community counts and confidence breakdown", mimeType="text/plain"),
             types.Resource(uri=AnyUrl("graphify://god-nodes"), name="God Nodes", description="Top 10 most-connected nodes", mimeType="text/plain"),
@@ -965,11 +966,29 @@ def _build_server(graph_path: str):
             types.Resource(uri=AnyUrl("graphify://audit"), name="Confidence Audit", description="EXTRACTED/INFERRED/AMBIGUOUS edge breakdown", mimeType="text/plain"),
             types.Resource(uri=AnyUrl("graphify://questions"), name="Suggested Questions", description="Suggested questions for this codebase", mimeType="text/plain"),
         ]
+        if not disable_arch:
+            arch_report_path = Path(graph_path).parent / "arch_audit.md"
+            if arch_report_path.exists():
+                res_list.append(types.Resource(uri=AnyUrl("graphify://arch-report"), name="Arch Report", description="Architectural violations and layers report", mimeType="text/markdown"))
+            arch_json_path = Path(graph_path).parent / "arch_report.json"
+            if arch_json_path.exists():
+                res_list.append(types.Resource(uri=AnyUrl("graphify://arch-json"), name="Arch JSON", description="Raw component architecture metadata mapping", mimeType="application/json"))
+        return res_list
 
     @server.read_resource()
     async def read_resource(uri: AnyUrl) -> str:
         _maybe_reload()
         uri_str = str(uri)
+        if uri_str == "graphify://arch-report":
+            path = Path(graph_path).parent / "arch_audit.md"
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+            return "Architecture audit report not found."
+        if uri_str == "graphify://arch-json":
+            path = Path(graph_path).parent / "arch_report.json"
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+            return "Architecture JSON report not found."
         if uri_str == "graphify://report":
             report_path = Path(graph_path).parent / "GRAPH_REPORT.md"
             if report_path.exists():
