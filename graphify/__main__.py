@@ -2153,8 +2153,10 @@ def main() -> None:
         print("    --graph <path>          path to graph.json (default <path>/graphify-out/graph.json)")
         print("    --no-label              keep 'Community N' placeholders (skip LLM community naming)")
         print("    --backend=<name>        backend to use for community naming (default: auto-detect)")
+        print("    --model=<name>          model to use for community naming")
         print("  label <path>            (re)name communities with the configured LLM backend, regenerate report")
         print("    --backend=<name>        backend to use (default: auto-detect from API keys)")
+        print("    --model=<name>          model to use for community naming")
         print("  query \"<question>\"       BFS traversal of graph.json for a question")
         print("    --dfs                   use depth-first instead of breadth-first")
         print("    --context C             explicit edge-context filter (repeatable)")
@@ -2194,6 +2196,7 @@ def main() -> None:
         print("    --postgres DSN          extract schema from a live PostgreSQL database")
         print("                            maps tables, views, functions + FK relationships;")
         print("                            column-level detail is not represented in the graph")
+        print("    --cargo                 extract crate→crate deps from Cargo.toml")
         print("    --global                also merge the resulting graph into the global graph")
         print("    --as <tag>              repo tag for --global (default: target directory name)")
         print("  global add <graph.json>  add/update a project graph in the global graph (~/.graphify/global-graph.json)")
@@ -3156,6 +3159,8 @@ def main() -> None:
         no_label = "--no-label" in sys.argv
         _backend_arg = next((a for a in sys.argv if a.startswith("--backend=")), None)
         label_backend = _backend_arg.split("=", 1)[1] if _backend_arg else None
+        _model_arg = next((a for a in sys.argv if a.startswith("--model=")), None)
+        label_model = _model_arg.split("=", 1)[1] if _model_arg else None
         _min_cs_arg = next((a for a in sys.argv if a.startswith("--min-community-size=")), None)
         min_community_size = int(_min_cs_arg.split("=")[1]) if _min_cs_arg else 3
         args = sys.argv[2:]
@@ -3168,6 +3173,14 @@ def main() -> None:
             a = args[i_arg]
             if a == "--graph" and i_arg + 1 < len(args):
                 graph_override = Path(args[i_arg + 1]); i_arg += 2
+            elif a == "--backend" and i_arg + 1 < len(args):
+                label_backend = args[i_arg + 1]; i_arg += 2
+            elif a.startswith("--backend="):
+                label_backend = a.split("=", 1)[1]; i_arg += 1
+            elif a == "--model" and i_arg + 1 < len(args):
+                label_model = args[i_arg + 1]; i_arg += 2
+            elif a.startswith("--model="):
+                label_model = a.split("=", 1)[1]; i_arg += 1
             elif a == "--resolution" and i_arg + 1 < len(args):
                 co_resolution = float(args[i_arg + 1]); i_arg += 2
             elif a.startswith("--resolution="):
@@ -3265,7 +3278,7 @@ def main() -> None:
             # The final labels (LLM or placeholder fallback) are persisted to
             # .graphify_labels.json by the unconditional write below.
             labels, _ = generate_community_labels(
-                G, communities, backend=label_backend, gods=gods
+                G, communities, backend=label_backend, model=label_model, gods=gods
             )
         questions = suggest_questions(G, communities, labels)
         tokens = {"input": 0, "output": 0}
@@ -3562,7 +3575,7 @@ def main() -> None:
 
     elif cmd == "export":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
-        if subcmd not in ("html", "callflow-html", "obsidian", "wiki", "svg", "graphml", "neo4j"):
+        if subcmd not in ("html", "callflow-html", "obsidian", "wiki", "svg", "graphml", "neo4j", "falkordb"):
             print("Usage: graphify export <format>", file=sys.stderr)
             print("  html      [--graph PATH] [--labels PATH] [--node-limit N] [--no-viz]", file=sys.stderr)
             print("  callflow-html [GRAPH|DIR] [--graph PATH] [--labels PATH] [--report PATH] [--sections PATH] [--output HTML]", file=sys.stderr)
@@ -3573,6 +3586,8 @@ def main() -> None:
             print("  graphml   [--graph PATH]", file=sys.stderr)
             print("  neo4j     [--graph PATH] [--push URI] [--user U] [--password P]", file=sys.stderr)
             print("            (or set NEO4J_PASSWORD instead of --password to keep it off argv)", file=sys.stderr)
+            print("  falkordb  [--graph PATH] [--push URI] [--user U] [--password P]", file=sys.stderr)
+            print("            (or set FALKORDB_PASSWORD instead of --password to keep it off argv)", file=sys.stderr)
             sys.exit(1)
 
         # Parse shared args
@@ -3594,12 +3609,18 @@ def main() -> None:
         node_limit = 5000
         no_viz = False
         obsidian_dir = Path(_GRAPHIFY_OUT) / "obsidian"
-        neo4j_uri: str | None = None
-        neo4j_user = "neo4j"
-        # F-031: prefer the NEO4J_PASSWORD env var so the password never
-        # appears on argv (visible in `ps` output / shell history). The
-        # explicit --password flag still overrides it for compatibility.
-        neo4j_password: str | None = os.environ.get("NEO4J_PASSWORD") or None
+        # Shared push-connection settings for the graph-database sinks (neo4j,
+        # falkordb), parsed from the generic --push/--user/--password flags below.
+        push_uri: str | None = None
+        push_user = "neo4j"  # Neo4j default user; FalkorDB auth is optional and ignores it
+        # F-031: prefer an env var so the password never appears on argv (visible
+        # in `ps` output / shell history). The explicit --password flag still
+        # overrides it. Each sink reads its own var: FALKORDB_PASSWORD for falkordb,
+        # NEO4J_PASSWORD otherwise.
+        push_password: str | None = (
+            os.environ.get("FALKORDB_PASSWORD") if subcmd == "falkordb"
+            else os.environ.get("NEO4J_PASSWORD")
+        ) or None
         i = 0
         while i < len(args):
             a = args[i]
@@ -3650,11 +3671,11 @@ def main() -> None:
             elif a == "--dir" and i + 1 < len(args):
                 obsidian_dir = Path(args[i + 1]); i += 2
             elif a == "--push" and i + 1 < len(args):
-                neo4j_uri = args[i + 1]; i += 2
+                push_uri = args[i + 1]; i += 2
             elif a == "--user" and i + 1 < len(args):
-                neo4j_user = args[i + 1]; i += 2
+                push_user = args[i + 1]; i += 2
             elif a == "--password" and i + 1 < len(args):
-                neo4j_password = args[i + 1]; i += 2
+                push_password = args[i + 1]; i += 2
             elif subcmd == "callflow-html" and not a.startswith("-") and not graph_path_explicit:
                 candidate = Path(a)
                 if candidate.name == "graph.json" or candidate.suffix.lower() == ".json":
@@ -3832,18 +3853,32 @@ def main() -> None:
             print(f"graph.graphml written - open in Gephi, yEd, or any GraphML tool")
 
         elif subcmd == "neo4j":
-            if neo4j_uri:
+            if push_uri:
                 from graphify.export import push_to_neo4j as _push
-                if neo4j_password is None:
+                if push_password is None:
                     print("error: --password required for --push", file=sys.stderr)
                     sys.exit(1)
-                result = _push(G, uri=neo4j_uri, user=neo4j_user,
-                               password=neo4j_password, communities=communities)
+                result = _push(G, uri=push_uri, user=push_user,
+                               password=push_password, communities=communities)
                 print(f"Pushed to Neo4j: {result['nodes']} nodes, {result['edges']} edges")
             else:
                 from graphify.export import to_cypher as _to_cypher
                 _to_cypher(G, str(out_dir / "cypher.txt"))
                 print(f"cypher.txt written - import with: cypher-shell < {out_dir}/cypher.txt")
+
+        elif subcmd == "falkordb":
+            if push_uri:
+                from graphify.export import push_to_falkordb as _push
+                result = _push(G, uri=push_uri, user=push_user,
+                               password=push_password, communities=communities)
+                print(f"Pushed to FalkorDB: {result['nodes']} nodes, {result['edges']} edges")
+            else:
+                from graphify.export import to_cypher as _to_cypher
+                _to_cypher(G, str(out_dir / "cypher.txt"))
+                print(f"cypher.txt written ({out_dir}/cypher.txt) - statements are OpenCypher. "
+                      f"FalkorDB's GRAPH.QUERY runs one statement at a time (no bulk script "
+                      f"import), so load a graph with: graphify export falkordb --push "
+                      f"falkordb://localhost:6379")
 
     elif cmd == "benchmark":
         from graphify.benchmark import run_benchmark, print_benchmark
@@ -3930,7 +3965,7 @@ def main() -> None:
                 "Usage: graphify extract <path> [--backend gemini|kimi|claude|openai|deepseek|ollama] "
                 "[--model M] [--mode deep] [--out DIR] [--google-workspace] [--no-cluster] "
                 "[--max-workers N] [--token-budget N] [--max-concurrency N] "
-                "[--api-timeout S] [--postgres DSN]",
+                "[--api-timeout S] [--postgres DSN] [--cargo]",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -3950,6 +3985,7 @@ def main() -> None:
         extract_mode: str | None = None
         out_dir: Path | None = None
         cli_postgres_dsn: str | None = None
+        cli_cargo: bool = False
         no_cluster = False
         dedup_llm = False
         google_workspace = False
@@ -4049,6 +4085,9 @@ def main() -> None:
                 cli_postgres_dsn = args[i + 1]; i += 2
             elif a.startswith("--postgres="):
                 cli_postgres_dsn = a.split("=", 1)[1]; i += 1
+            elif a == "--cargo":
+                cli_cargo = True
+                i += 1
             else:
                 i += 1
 
@@ -4232,7 +4271,10 @@ def main() -> None:
         ast_result: dict = {"nodes": [], "edges": [], "input_tokens": 0, "output_tokens": 0}
         if code_files:
             from graphify.extract import extract as _ast_extract
-            ast_kwargs: dict = {"cache_root": target}
+            # Anchor the cache at the output root, not the scanned project:
+            # with --out, a <target>/graphify-out/cache/ would leak a
+            # graphify-out/ dir into a project that asked for external output.
+            ast_kwargs: dict = {"cache_root": out_root}
             if cli_max_workers is not None:
                 ast_kwargs["max_workers"] = cli_max_workers
             print(f"[graphify extract] AST extraction on {len(code_files)} code files...")
@@ -4256,7 +4298,7 @@ def main() -> None:
         if semantic_files:
             sem_paths_str = [str(p) for p in semantic_files]
             cached_nodes, cached_edges, cached_hyperedges, uncached_paths = (
-                _check_semantic_cache(sem_paths_str, root=target)
+                _check_semantic_cache(sem_paths_str, root=out_root)
             )
             sem_cache_hits = len(semantic_files) - len(uncached_paths)
             sem_cache_misses = len(uncached_paths)
@@ -4326,7 +4368,7 @@ def main() -> None:
                         fresh.get("nodes", []),
                         fresh.get("edges", []),
                         fresh.get("hyperedges", []),
-                        root=target,
+                        root=out_root,
                     )
                 except Exception as exc:
                     print(f"[graphify extract] warning: could not write semantic cache: {exc}", file=sys.stderr)
@@ -4348,13 +4390,25 @@ def main() -> None:
             print(f"[graphify extract] PostgreSQL: {len(pg_result['nodes'])} nodes, "
                   f"{len(pg_result['edges'])} edges")
 
-        # Merge AST + semantic + pg_result. Order matters for deduplication: passing AST
+        cargo_result: dict = {"nodes": [], "edges": []}
+        if cli_cargo:
+            from graphify.cargo_introspect import introspect_cargo
+            print("[graphify extract] introspecting Cargo workspace...")
+            try:
+                cargo_result = introspect_cargo(target)
+            except (ConnectionError, ImportError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                sys.exit(1)
+            print(f"[graphify extract] Cargo: {len(cargo_result['nodes'])} nodes, "
+                  f"{len(cargo_result['edges'])} edges")
+
+        # Merge AST + semantic + pg_result + cargo_result. Order matters for deduplication: passing AST
         # first means semantic node attributes win on collision (richer labels
         # for symbols also referenced in docs). Hyperedges only come from the
         # semantic side.
         merged: dict = {
-            "nodes": list(ast_result.get("nodes", [])) + list(sem_result.get("nodes", [])) + list(pg_result.get("nodes", [])),
-            "edges": list(ast_result.get("edges", [])) + list(sem_result.get("edges", [])) + list(pg_result.get("edges", [])),
+            "nodes": list(ast_result.get("nodes", [])) + list(sem_result.get("nodes", [])) + list(pg_result.get("nodes", [])) + list(cargo_result.get("nodes", [])),
+            "edges": list(ast_result.get("edges", [])) + list(sem_result.get("edges", [])) + list(pg_result.get("edges", [])) + list(cargo_result.get("edges", [])),
             "hyperedges": list(sem_result.get("hyperedges", [])),
             "input_tokens": ast_result.get("input_tokens", 0) + sem_result.get("input_tokens", 0),
             "output_tokens": ast_result.get("output_tokens", 0) + sem_result.get("output_tokens", 0),
@@ -4615,7 +4669,7 @@ def main() -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
         print(
-            f"Merged {len(chunk_files)} chunks: {merged['nodes']} nodes, {len(merged['edges'])} edges, "
+            f"Merged {len(chunk_files)} chunks: {len(merged['nodes'])} nodes, {len(merged['edges'])} edges, "
             f"{merged['input_tokens']:,} in / {merged['output_tokens']:,} out tokens"
         )
 

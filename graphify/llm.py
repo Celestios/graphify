@@ -1,4 +1,3 @@
-# Direct LLM backend for semantic extraction — supports Claude, Kimi K2.6,
 # Gemini, and OpenAI.
 # Used by `graphify extract . --backend gemini` and the benchmark scripts.
 # The default graphify pipeline uses Claude Code subagents via skill.md;
@@ -320,6 +319,18 @@ def _bedrock_inference_config(max_tokens: int, model: str = "") -> dict:
     if temp is not None:
         cfg["temperature"] = temp
     return cfg
+
+
+def _no_window_kwargs() -> dict:
+    """subprocess kwargs that suppress the console window claude.cmd would
+    otherwise pop on Windows. A labeling/extraction run spawns one `claude -p`
+    per batch — with Windows Terminal as the default terminal each spawn
+    becomes a visible window that appears and vanishes for the duration of the
+    model call. CREATE_NO_WINDOW keeps the children invisible; no-op elsewhere."""
+    import subprocess
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 def _resolve_api_timeout(default: float = 600.0) -> float:
@@ -984,6 +995,38 @@ def _call_claude(api_key: str, model: str, user_message: str, max_tokens: int = 
     return result
 
 
+def _claude_cli_envelope(stdout: str) -> dict:
+    """Parse the JSON returned by `claude -p --output-format json`.
+
+    Older Claude Code CLI versions returned a single envelope object. Newer
+    versions (>= ~2.1) emit a JSON ARRAY of streamed event objects (a system
+    init event, assistant turns, an optional rate_limit_event, and a final
+    {"type":"result"} object). Normalize both shapes to the result dict that
+    carries `result`, `usage`, `modelUsage`, and `stop_reason`.
+    """
+    try:
+        envelope = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"claude -p produced unparseable JSON envelope: {exc}; "
+            f"first 500 chars of stdout: {stdout[:500]!r}"
+        ) from exc
+    if isinstance(envelope, list):
+        result_events = [
+            e for e in envelope
+            if isinstance(e, dict) and e.get("type") == "result"
+        ]
+        if result_events:
+            return result_events[-1]
+        if envelope and isinstance(envelope[-1], dict):
+            return envelope[-1]
+        raise RuntimeError(
+            "claude -p returned a JSON array with no result object; "
+            f"first 500 chars of stdout: {stdout[:500]!r}"
+        )
+    return envelope
+
+
 def _call_claude_cli(user_message: str, max_tokens: int = 8192, *, deep_mode: bool = False, images: list[_ImageRef] | None = None) -> dict:
     """Call Claude via the locally-installed Claude Code CLI (`claude -p`).
 
@@ -1064,19 +1107,14 @@ def _call_claude_cli(user_message: str, max_tokens: int = 8192, *, deep_mode: bo
         encoding="utf-8",  # Force UTF-8 — prevents UnicodeEncodeError on Windows cp1252
         timeout=_resolve_api_timeout(),
         check=False,
+        **_no_window_kwargs(),
     )
     if proc.returncode != 0:
         raise RuntimeError(
             f"claude -p exited {proc.returncode}: {proc.stderr.strip()[:500]}"
         )
 
-    try:
-        envelope = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"claude -p produced unparseable JSON envelope: {exc}; "
-            f"first 500 chars of stdout: {proc.stdout[:500]!r}"
-        ) from exc
+    envelope = _claude_cli_envelope(proc.stdout)
 
     raw_content = envelope.get("result", "")
     result = _parse_llm_json(raw_content or "{}")
@@ -1678,7 +1716,13 @@ def _merge_into(merged: dict, result: dict) -> None:
     merged["output_tokens"] += result.get("output_tokens", 0)
 
 
-def _call_llm(prompt: str, *, backend: str, max_tokens: int = 200) -> str:
+def _call_llm(
+    prompt: str,
+    *,
+    backend: str,
+    max_tokens: int = 200,
+    model: str | None = None,
+) -> str:
     """Send a plain-text prompt to `backend` and return the model's text reply.
 
     Used by lightweight callers (e.g. `graphify.dedup` LLM tiebreaker) that
@@ -1702,7 +1746,7 @@ def _call_llm(prompt: str, *, backend: str, max_tokens: int = 200) -> str:
         raise ValueError(
             f"No API key for backend '{backend}'. Set {_format_backend_env_keys(backend)}."
         )
-    mdl = _default_model_for_backend(backend)
+    mdl = model or _default_model_for_backend(backend)
 
     if backend == "claude":
         try:
@@ -1718,24 +1762,35 @@ def _call_llm(prompt: str, *, backend: str, max_tokens: int = 200) -> str:
         return resp.content[0].text if resp.content else ""
 
     if backend == "claude-cli":
-        import shutil, subprocess
-        if shutil.which("claude") is None:
+        import platform, shutil, subprocess
+        # Mirror the extraction-path resolution: on Windows the npm shim is
+        # claude.cmd, which CreateProcess can't resolve from a bare "claude"
+        # (PATHEXT doesn't apply), so pass the resolved .cmd path explicitly.
+        claude_cmd = "claude"
+        if platform.system() == "Windows":
+            cmd_path = shutil.which("claude.cmd")
+            if cmd_path:
+                claude_cmd = cmd_path
+            elif shutil.which("claude") is None:
+                raise RuntimeError("Claude Code CLI not found on $PATH")
+        elif shutil.which("claude") is None:
             raise RuntimeError("Claude Code CLI not found on $PATH")
+        cli_args = [claude_cmd, "-p", "--output-format", "json", "--no-session-persistence"]
+        if model is not None:
+            cli_args.extend(["--model", mdl])
         proc = subprocess.run(
-            ["claude", "-p", "--output-format", "json", "--no-session-persistence"],
+            cli_args,
             input=prompt,
             capture_output=True,
             text=True,
             encoding="utf-8",  # Force UTF-8 — prevents UnicodeEncodeError on Windows cp1252
             timeout=_resolve_api_timeout(),
             check=False,
+            **_no_window_kwargs(),
         )
         if proc.returncode != 0:
             raise RuntimeError(f"claude -p exited {proc.returncode}: {proc.stderr.strip()[:500]}")
-        try:
-            envelope = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"claude -p produced unparseable JSON envelope: {exc}") from exc
+        envelope = _claude_cli_envelope(proc.stdout)
         return envelope.get("result", "")
 
 
@@ -1987,6 +2042,7 @@ def label_communities(
     communities,
     *,
     backend: str,
+    model: str | None = None,
     gods=None,
     max_communities: int | None = None,
     top_k: int = _LABEL_TOP_K,
@@ -2038,7 +2094,10 @@ def label_communities(
         # _resolve_max_tokens so GRAPHIFY_MAX_OUTPUT_TOKENS applies here too (#1200).
         max_tokens = _resolve_max_tokens(min(64 + 24 * len(batch_cids), 8192))
         try:
-            text = _call_llm(prompt, backend=backend, max_tokens=max_tokens)
+            call_kwargs = {"backend": backend, "max_tokens": max_tokens}
+            if model is not None:
+                call_kwargs["model"] = model
+            text = _call_llm(prompt, **call_kwargs)
             parsed = _parse_label_response(text, batch_cids)
             labels.update(parsed)
             written += len(parsed)
@@ -2063,6 +2122,7 @@ def generate_community_labels(
     communities,
     *,
     backend: str | None = None,
+    model: str | None = None,
     gods=None,
     quiet: bool = False,
 ) -> tuple[dict[int, str], str]:
@@ -2084,7 +2144,7 @@ def generate_community_labels(
             )
         return _placeholder_community_labels(communities), "placeholder"
     try:
-        labels = label_communities(G, communities, backend=backend, gods=gods)
+        labels = label_communities(G, communities, backend=backend, model=model, gods=gods)
         return labels, "llm"
     except Exception as exc:
         if not quiet:
